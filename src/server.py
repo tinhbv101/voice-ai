@@ -158,11 +158,15 @@ async def handle_text_input(session_id: str, text: str):
         logger.info(f"Starting Gemini stream for session {session_id}")
         
         # Define a helper to process sentences for TTS as they arrive
-        async def process_sentence_tts(text_to_speak: str):
+        async def process_sentence_tts(text_to_speak: str, is_first: bool = False):
             if not text_to_speak.strip():
                 return
             try:
-                logger.info(f"Generating TTS for chunk: {text_to_speak[:30]}...")
+                # Add a small delay for non-first sentences to let the first one breathe
+                if not is_first:
+                    await asyncio.sleep(0.1)
+                
+                logger.info(f"Generating TTS for {'first ' if is_first else ''}chunk: {text_to_speak[:30]}...")
                 tts = get_tts_client()
                 
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
@@ -182,6 +186,7 @@ async def handle_text_input(session_id: str, text: str):
             except Exception as e:
                 logger.error(f"TTS sentence processing error: {e}")
 
+        is_first_sentence = True
         for chunk in gemini_client.chat_stream(text, history_without_current):
             chunk_count += 1
             full_response += chunk
@@ -191,11 +196,11 @@ async def handle_text_input(session_id: str, text: str):
             response_msg = create_text_response(chunk, session_id)
             await connection_manager.send_message(session_id, response_msg)
             
-            # If we hit a sentence boundary, trigger TTS immediately
-            if any(punct in chunk for punct in [".", "!", "?", "\n", "。", "！", "？"]):
-                # Run TTS in background tasks to not block Gemini streaming
-                asyncio.create_task(process_sentence_tts(current_sentence))
+            # Split by more natural markers for faster first response
+            if any(punct in chunk for punct in [".", "!", "?", "\n", "。", "！", "？", ":", "："]):
+                asyncio.create_task(process_sentence_tts(current_sentence, is_first_sentence))
                 current_sentence = ""
+                is_first_sentence = False
 
         # Process any remaining text
         if current_sentence.strip():
