@@ -1,0 +1,16 @@
+# Production dependencies
+google-generativeai>=0.8.0
+python-dotenv>=1.0.0
+rich>=13.7.0
+edge-tts>=6.1.0
+pydub>=0.25.0
+aiofiles>=23.0.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+websockets>=14.0
+python-multipart>=0.0.20
+faster-whisper>=1.0.0
+
+# Development dependencies
+pytest>=7.4.0
+pytest-asyncio>=0.23.0

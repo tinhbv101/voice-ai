@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoiceAI - Phase 4</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .message-user {
+            background: #3b82f6;
+            color: white;
+            margin-left: auto;
+        }
+        .message-assistant {
+            background: #10b981;
+            color: white;
+            margin-right: auto;
+        }
+        .message-transcript {
+            background: #8b5cf6;
+            color: white;
+            margin-left: auto;
+            border-left: 4px solid #6d28d9;
+        }
+        .message-status {
+            background: #6b7280;
+            color: white;
+            margin: 0 auto;
+            font-size: 0.875rem;
+        }
+        .message-error {
+            background: #ef4444;
+            color: white;
+            margin: 0 auto;
+        }
+        .recording {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-8 max-w-4xl">
+        <!-- Header -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h1 class="text-3xl font-bold text-gray-800 mb-2">🎭 VoiceAI - Phase 4</h1>
+            <p class="text-gray-600">Real-time Voice AI with STT, LLM & TTS</p>
+        </div>
+
+        <!-- Connection Status -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h2 class="text-xl font-semibold text-gray-800 mb-2">Connection Status</h2>
+                    <p id="connection-status" class="text-gray-600">Disconnected</p>
+                    <p id="session-id" class="text-sm text-gray-500 mt-1"></p>
+                </div>
+                <div>
+                    <button id="connect-btn" onclick="connect()" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg font-medium">
+                        Connect
+                    </button>
+                    <button id="disconnect-btn" onclick="disconnect()" class="bg-red-500 hover:bg-red-600 text-white px-6 py-2 rounded-lg font-medium ml-2 hidden">
+                        Disconnect
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Audio Controls -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">🎤 Voice Input</h2>
+            <div class="flex gap-2 items-center">
+                <button
+                    id="record-btn"
+                    onclick="toggleRecording()"
+                    class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-3 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled
+                >
+                    🎤 Start Recording
+                </button>
+                <div id="recording-indicator" class="hidden">
+                    <span class="recording text-red-600 font-semibold">● Recording...</span>
+                </div>
+                <div id="audio-status" class="text-sm text-gray-600 ml-4"></div>
+            </div>
+        </div>
+
+        <!-- Chat Area -->
+        <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">💬 Chat</h2>
+
+            <!-- Messages -->
+            <div id="messages" class="h-96 overflow-y-auto mb-4 p-4 bg-gray-50 rounded-lg space-y-2">
+                <div class="text-gray-500 text-center text-sm">
+                    No messages yet. Connect and start chatting!
+                </div>
+            </div>
+
+            <!-- Input -->
+            <div class="flex gap-2">
+                <input
+                    type="text"
+                    id="message-input"
+                    placeholder="Type your message (Vietnamese or English)..."
+                    class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    onkeypress="handleKeyPress(event)"
+                    disabled
+                />
+                <button
+                    id="send-btn"
+                    onclick="sendMessage()"
+                    class="bg-green-500 hover:bg-green-600 text-white px-6 py-2 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled
+                >
+                    Send
+                </button>
+                <button
+                    onclick="clearMessages()"
+                    class="bg-gray-500 hover:bg-gray-600 text-white px-6 py-2 rounded-lg font-medium"
+                >
+                    Clear
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let sessionId = null;
+        let currentAssistantMessage = null;
+        
+        // Audio recording
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
+        let audioStream = null;
+
+        function connect() {
+            const wsUrl = 'ws://localhost:8000/ws';
+
+            try {
+                ws = new WebSocket(wsUrl);
+
+                ws.onopen = () => {
+                    updateConnectionStatus('Connected', true);
+                    document.getElementById('message-input').disabled = false;
+                    document.getElementById('send-btn').disabled = false;
+                    document.getElementById('record-btn').disabled = false;
+                };
+
+                ws.onmessage = (event) => {
+                    handleMessage(JSON.parse(event.data));
+                };
+
+                ws.onclose = () => {
+                    updateConnectionStatus('Disconnected', false);
+                    document.getElementById('message-input').disabled = true;
+                    document.getElementById('send-btn').disabled = true;
+                    document.getElementById('record-btn').disabled = true;
+                    ws = null;
+                    sessionId = null;
+                };
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    addMessage('error', 'Connection error occurred');
+                };
+
+            } catch (error) {
+                console.error('Failed to connect:', error);
+                addMessage('error', 'Failed to connect to server');
+            }
+        }
+
+        function disconnect() {
+            if (isRecording) {
+                stopRecording();
+            }
+            if (ws) {
+                ws.close();
+            }
+        }
+
+        async function toggleRecording() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                await startRecording();
+            }
+        }
+
+        async function startRecording() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('Please connect to the server first');
+                return;
+            }
+
+            try {
+                // Request microphone access
+                audioStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: 16000,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+
+                // Create media recorder
+                mediaRecorder = new MediaRecorder(audioStream, {
+                    mimeType: 'audio/webm;codecs=opus'
+                });
+
+                audioChunks = [];
+
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        audioChunks.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = async () => {
+                    // Combine all chunks
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    await sendAudioToServer(audioBlob);
+                    
+                    // Clean up
+                    if (audioStream) {
+                        audioStream.getTracks().forEach(track => track.stop());
+                        audioStream = null;
+                    }
+                };
+
+                // Send start recording message
+                const startMsg = {
+                    type: 'start_recording',
+                    data: {},
+                    session_id: sessionId
+                };
+                ws.send(JSON.stringify(startMsg));
+
+                // Start recording
+                mediaRecorder.start();
+                isRecording = true;
+
+                // Update UI
+                document.getElementById('record-btn').textContent = '⏹ Stop Recording';
+                document.getElementById('record-btn').classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                document.getElementById('record-btn').classList.add('bg-red-500', 'hover:bg-red-600');
+                document.getElementById('recording-indicator').classList.remove('hidden');
+                document.getElementById('audio-status').textContent = 'Recording...';
+
+                addMessage('status', '🎤 Recording started');
+
+            } catch (error) {
+                console.error('Failed to start recording:', error);
+                addMessage('error', `Failed to access microphone: ${error.message}`);
+            }
+        }
+
+        function stopRecording() {
+            if (!isRecording || !mediaRecorder) return;
+
+            mediaRecorder.stop();
+            isRecording = false;
+
+            // Update UI
+            document.getElementById('record-btn').textContent = '🎤 Start Recording';
+            document.getElementById('record-btn').classList.remove('bg-red-500', 'hover:bg-red-600');
+            document.getElementById('record-btn').classList.add('bg-blue-500', 'hover:bg-blue-600');
+            document.getElementById('recording-indicator').classList.add('hidden');
+            document.getElementById('audio-status').textContent = 'Processing...';
+
+            addMessage('status', '⏹ Recording stopped, processing...');
+        }
+
+        async function sendAudioToServer(audioBlob) {
+            try {
+                // Convert blob to array buffer
+                const arrayBuffer = await audioBlob.arrayBuffer();
+                const uint8Array = new Uint8Array(arrayBuffer);
+                
+                // Convert to base64
+                let binary = '';
+                const len = uint8Array.byteLength;
+                for (let i = 0; i < len; i++) {
+                    binary += String.fromCharCode(uint8Array[i]);
+                }
+                const base64Audio = btoa(binary);
+
+                // Send audio chunk message
+                const audioMsg = {
+                    type: 'audio_chunk',
+                    data: {
+                        audio: base64Audio
+                    },
+                    session_id: sessionId
+                };
+                ws.send(JSON.stringify(audioMsg));
+
+                // Send stop recording message
+                const stopMsg = {
+                    type: 'stop_recording',
+                    data: {},
+                    session_id: sessionId
+                };
+                ws.send(JSON.stringify(stopMsg));
+
+                document.getElementById('audio-status').textContent = `Sent ${audioBlob.size} bytes`;
+
+            } catch (error) {
+                console.error('Failed to send audio:', error);
+                addMessage('error', `Failed to send audio: ${error.message}`);
+                document.getElementById('audio-status').textContent = 'Error sending audio';
+            }
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('message-input');
+            const text = input.value.trim();
+
+            if (!text || !ws) return;
+
+            const message = {
+                type: 'text_input',
+                data: {
+                    text: text
+                },
+                session_id: sessionId
+            };
+
+            ws.send(JSON.stringify(message));
+            addMessage('user', text);
+            input.value = '';
+
+            // Prepare for streaming assistant response
+            currentAssistantMessage = null;
+        }
+
+        function handleMessage(message) {
+            console.log('Received:', message);
+
+            if (message.session_id && !sessionId) {
+                sessionId = message.session_id;
+                document.getElementById('session-id').textContent = `Session: ${sessionId.substring(0, 8)}...`;
+            }
+
+            switch (message.type) {
+                case 'status':
+                    addMessage('status', message.data.status);
+                    break;
+
+                case 'text_response':
+                    // Handle streaming text response
+                    const text = message.data.text;
+                    if (!currentAssistantMessage) {
+                        currentAssistantMessage = addMessage('assistant', text);
+                    } else {
+                        currentAssistantMessage.textContent += text;
+                        scrollToBottom();
+                    }
+                    break;
+
+                case 'transcript':
+                    // Show transcribed text
+                    addMessage('transcript', `🎤 "${message.data.transcript}"`);
+                    break;
+
+                case 'audio_response':
+                    // Play audio response
+                    playAudioResponse(message.data.audio);
+                    break;
+
+                case 'error':
+                    addMessage('error', message.data.error);
+                    document.getElementById('audio-status').textContent = 'Error';
+                    break;
+
+                case 'pong':
+                    console.log('Pong received');
+                    break;
+
+                default:
+                    console.log('Unknown message type:', message.type);
+            }
+        }
+
+        function playAudioResponse(audioBase64) {
+            try {
+                // Convert base64 to blob
+                const audioData = atob(audioBase64);
+                const arrayBuffer = new ArrayBuffer(audioData.length);
+                const uint8Array = new Uint8Array(arrayBuffer);
+                
+                for (let i = 0; i < audioData.length; i++) {
+                    uint8Array[i] = audioData.charCodeAt(i);
+                }
+                
+                const blob = new Blob([uint8Array], { type: 'audio/mpeg' });
+                const audioUrl = URL.createObjectURL(blob);
+                
+                // Create audio element and play
+                const audio = new Audio(audioUrl);
+                audio.play().then(() => {
+                    console.log('Playing audio response');
+                    addMessage('status', '🔊 Playing audio response');
+                }).catch(error => {
+                    console.error('Error playing audio:', error);
+                    addMessage('error', 'Failed to play audio');
+                });
+                
+                // Cleanup URL after playback
+                audio.onended = () => {
+                    URL.revokeObjectURL(audioUrl);
+                };
+                
+            } catch (error) {
+                console.error('Error processing audio:', error);
+                addMessage('error', 'Failed to process audio response');
+            }
+        }
+
+        function addMessage(type, content) {
+            const messagesDiv = document.getElementById('messages');
+
+            // Clear placeholder
+            if (messagesDiv.children.length === 1 &&
+                messagesDiv.children[0].textContent.includes('No messages yet')) {
+                messagesDiv.innerHTML = '';
+            }
+
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message-${type} px-4 py-2 rounded-lg max-w-md break-words`;
+            messageDiv.textContent = content;
+
+            messagesDiv.appendChild(messageDiv);
+            scrollToBottom();
+
+            return messageDiv;
+        }
+
+        function clearMessages() {
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.innerHTML = '<div class="text-gray-500 text-center text-sm">Messages cleared</div>';
+            currentAssistantMessage = null;
+        }
+
+        function scrollToBottom() {
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function updateConnectionStatus(status, connected) {
+            const statusElement = document.getElementById('connection-status');
+            statusElement.textContent = status;
+            statusElement.className = connected ? 'text-green-600 font-semibold' : 'text-red-600';
+
+            document.getElementById('connect-btn').classList.toggle('hidden', connected);
+            document.getElementById('disconnect-btn').classList.toggle('hidden', !connected);
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        // Ping to keep connection alive
+        setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const ping = {
+                    type: 'ping',
+                    data: {},
+                    session_id: sessionId
+                };
+                ws.send(JSON.stringify(ping));
+            }
+        }, 30000); // Every 30 seconds
+    </script>
+</body>
+</html>
