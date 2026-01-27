@@ -29,6 +29,8 @@ from src.memory import ConversationMemory
 from src.persona import get_system_instruction
 from src.stt_client import FasterWhisperClient, STTError
 from src.tts_client import EdgeTTSClient, TTSError
+from src.elevenlabs_tts_client import ElevenLabsTTSClient
+from src.openai_tts_client import OpenAI_TTSClient
 from src.audio_pipeline import AudioPipeline
 import base64
 
@@ -80,18 +82,36 @@ def get_stt_client() -> FasterWhisperClient:
     return stt_client
 
 # Initialize TTS client (singleton)
-tts_client: Optional[EdgeTTSClient] = None
+tts_client = None
 
-def get_tts_client() -> EdgeTTSClient:
-    """Get or create TTS client."""
+def get_tts_client():
+    """Get or create TTS client based on config."""
     global tts_client
     if tts_client is None:
         logger.info("Initializing TTS client...")
-        tts_client = EdgeTTSClient(
-            voice="vi-VN-HoaiMyNeural",  # Back to female voice
-            rate="+20%",  # High speed for anime vibe
-            pitch="+25Hz"  # High pitch to sound like anime/loli
-        )
+        config = Config()
+        
+        if config.tts_provider == "elevenlabs":
+            logger.info("Using ElevenLabs TTS")
+            tts_client = ElevenLabsTTSClient(
+                api_key=config.elevenlabs_api_key,
+                voice=config.elevenlabs_voice,
+                model=config.elevenlabs_model
+            )
+        elif config.tts_provider == "openai":
+            logger.info("Using OpenAI TTS")
+            tts_client = OpenAI_TTSClient(
+                api_key=config.openai_api_key,
+                voice=config.openai_voice,
+                model=config.openai_model
+            )
+        else:  # edge (default)
+            logger.info("Using Edge TTS")
+            tts_client = EdgeTTSClient(
+                voice="vi-VN-HoaiMyNeural",
+                rate="+20%",
+                pitch="+25Hz"
+            )
     return tts_client
 
 # Session storage: session_id -> (memory, gemini_client)

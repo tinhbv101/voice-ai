@@ -26,6 +26,17 @@ class Config:
         )
         self.temperature = self._get_float_env("TEMPERATURE", default=0.7)
 
+        # TTS configuration
+        self.tts_provider = os.getenv("TTS_PROVIDER", "elevenlabs")  # elevenlabs, openai, edge
+        self.elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY")
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        
+        # TTS settings
+        self.elevenlabs_voice = os.getenv("ELEVENLABS_VOICE", "elli")  # Young, energetic anime vibe
+        self.elevenlabs_model = os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2")  # Faster model
+        self.openai_voice = os.getenv("OPENAI_VOICE", "nova")
+        self.openai_model = os.getenv("OPENAI_MODEL", "tts-1")
+
         # Validate configuration
         self._validate()
 
@@ -66,3 +77,17 @@ class Config:
 
         if self.max_memory_messages <= 0:
             raise ConfigError("MAX_MEMORY_MESSAGES must be positive")
+
+        # Validate TTS provider
+        valid_providers = ["edge", "openai", "elevenlabs"]
+        if self.tts_provider not in valid_providers:
+            raise ConfigError(
+                f"TTS_PROVIDER must be one of: {', '.join(valid_providers)}"
+            )
+
+        # Validate API keys for selected provider
+        if self.tts_provider == "elevenlabs" and not self.elevenlabs_api_key:
+            raise ConfigError("ELEVENLABS_API_KEY is required when TTS_PROVIDER=elevenlabs")
+
+        if self.tts_provider == "openai" and not self.openai_api_key:
+            raise ConfigError("OPENAI_API_KEY is required when TTS_PROVIDER=openai")
