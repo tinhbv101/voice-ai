@@ -88,9 +88,9 @@ def get_tts_client() -> EdgeTTSClient:
     if tts_client is None:
         logger.info("Initializing TTS client...")
         tts_client = EdgeTTSClient(
-            voice="vi-VN-HoaiMyNeural",  # Vietnamese female voice
+            voice="vi-VN-NamMinhNeural",  # Vietnamese male voice
             rate="+15%",
-            pitch="+5Hz"
+            pitch="+0Hz"
         )
     return tts_client
 
