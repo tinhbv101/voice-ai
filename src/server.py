@@ -73,7 +73,7 @@ def get_stt_client() -> FasterWhisperClient:
     if stt_client is None:
         logger.info("Initializing STT client...")
         stt_client = FasterWhisperClient(
-            model_size="base",  # Fast and accurate for Vietnamese
+            model_size="tiny",  # Fastest model for Hackathon
             device="cpu",
             compute_type="int8"
         )
@@ -152,17 +152,54 @@ async def handle_text_input(session_id: str, text: str):
     try:
         # Stream response from Gemini
         full_response = ""
+        current_sentence = ""
         chunk_count = 0
         
         logger.info(f"Starting Gemini stream for session {session_id}")
+        
+        # Define a helper to process sentences for TTS as they arrive
+        async def process_sentence_tts(text_to_speak: str):
+            if not text_to_speak.strip():
+                return
+            try:
+                logger.info(f"Generating TTS for chunk: {text_to_speak[:30]}...")
+                tts = get_tts_client()
+                
+                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
+                    tmp_path = tmp_file.name
+                
+                await tts.synthesize(text_to_speak, tmp_path)
+                audio_bytes = Path(tmp_path).read_bytes()
+                audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+                
+                audio_msg = create_audio_response_message(audio_base64, session_id)
+                await connection_manager.send_message(session_id, audio_msg)
+                
+                try:
+                    Path(tmp_path).unlink()
+                except:
+                    pass
+            except Exception as e:
+                logger.error(f"TTS sentence processing error: {e}")
+
         for chunk in gemini_client.chat_stream(text, history_without_current):
             chunk_count += 1
-            logger.debug(f"Received chunk {chunk_count}: {chunk[:50]}...")
+            full_response += chunk
+            current_sentence += chunk
             
-            # Send each chunk to client
+            # Send text chunk to client immediately
             response_msg = create_text_response(chunk, session_id)
             await connection_manager.send_message(session_id, response_msg)
-            full_response += chunk
+            
+            # If we hit a sentence boundary, trigger TTS immediately
+            if any(punct in chunk for punct in [".", "!", "?", "\n", "。", "！", "？"]):
+                # Run TTS in background tasks to not block Gemini streaming
+                asyncio.create_task(process_sentence_tts(current_sentence))
+                current_sentence = ""
+
+        # Process any remaining text
+        if current_sentence.strip():
+            asyncio.create_task(process_sentence_tts(current_sentence))
 
         logger.info(f"Gemini stream complete for session {session_id}, total chunks: {chunk_count}")
         
@@ -171,42 +208,6 @@ async def handle_text_input(session_id: str, text: str):
             memory = memory.add_message("model", full_response)
             session_storage[session_id] = (memory, gemini_client)
             logger.info(f"Added response to memory for session {session_id}")
-            
-            # Generate TTS audio for the response
-            try:
-                logger.info(f"Generating TTS audio for session {session_id}")
-                tts = get_tts_client()
-                
-                # Create temporary file for audio
-                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
-                    tmp_path = tmp_file.name
-                
-                # Generate audio
-                await tts.synthesize(full_response, tmp_path)
-                
-                # Read audio file and convert to base64
-                audio_bytes = Path(tmp_path).read_bytes()
-                audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
-                
-                # Send audio response to client
-                audio_msg = create_audio_response_message(audio_base64, session_id)
-                await connection_manager.send_message(session_id, audio_msg)
-                
-                logger.info(f"Sent TTS audio ({len(audio_bytes)} bytes) for session {session_id}")
-                
-                # Cleanup temp file
-                try:
-                    Path(tmp_path).unlink()
-                except Exception as e:
-                    logger.warning(f"Failed to delete temp file {tmp_path}: {e}")
-                    
-            except TTSError as e:
-                logger.error(f"TTS error for session {session_id}: {e}")
-                # Continue without audio - text response already sent
-            except Exception as e:
-                logger.error(f"Unexpected TTS error for session {session_id}: {e}")
-                import traceback
-                traceback.print_exc()
         else:
             logger.warning(f"Empty response from Gemini for session {session_id}")
 
