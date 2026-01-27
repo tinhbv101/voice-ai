@@ -157,16 +157,29 @@ async def handle_text_input(session_id: str, text: str):
         
         logger.info(f"Starting Gemini stream for session {session_id}")
         
-        # Define a helper to process sentences for TTS as they arrive
-        async def process_sentence_tts(text_to_speak: str, is_first: bool = False):
+        # Queue to ensure audio is sent in correct order
+        audio_queue = asyncio.Queue()
+        
+        async def send_audio_worker():
+            while True:
+                audio_base64 = await audio_queue.get()
+                if audio_base64 is None: # Sentinel to stop
+                    break
+                audio_msg = create_audio_response_message(audio_base64, session_id)
+                await connection_manager.send_message(session_id, audio_msg)
+                audio_queue.task_done()
+                # Give a tiny gap between clips for natural playback
+                await asyncio.sleep(0.1)
+
+        # Start the worker to send audio in order
+        worker_task = asyncio.create_task(send_audio_worker())
+        
+        # Helper to process and ENQUEUE audio
+        async def process_sentence_tts(text_to_speak: str, order_idx: int):
             if not text_to_speak.strip():
                 return
             try:
-                # Add a small delay for non-first sentences to let the first one breathe
-                if not is_first:
-                    await asyncio.sleep(0.1)
-                
-                logger.info(f"Generating TTS for {'first ' if is_first else ''}chunk: {text_to_speak[:30]}...")
+                logger.info(f"Processing sentence {order_idx}: {text_to_speak[:30]}...")
                 tts = get_tts_client()
                 
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
@@ -176,37 +189,47 @@ async def handle_text_input(session_id: str, text: str):
                 audio_bytes = Path(tmp_path).read_bytes()
                 audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
                 
-                audio_msg = create_audio_response_message(audio_base64, session_id)
-                await connection_manager.send_message(session_id, audio_msg)
-                
+                # Instead of sending directly, we'd need a way to keep order
+                # For simplicity in this fix, we'll store tasks and wait for them in order
                 try:
                     Path(tmp_path).unlink()
-                except:
-                    pass
+                except: pass
+                return audio_base64
             except Exception as e:
-                logger.error(f"TTS sentence processing error: {e}")
+                logger.error(f"TTS error: {e}")
+                return None
 
-        is_first_sentence = True
+        tts_tasks = []
         for chunk in gemini_client.chat_stream(text, history_without_current):
             chunk_count += 1
             full_response += chunk
             current_sentence += chunk
             
-            # Send text chunk to client immediately
             response_msg = create_text_response(chunk, session_id)
             await connection_manager.send_message(session_id, response_msg)
             
-            # Split by more natural markers for faster first response
             if any(punct in chunk for punct in [".", "!", "?", "\n", "。", "！", "？", ":", "："]):
-                asyncio.create_task(process_sentence_tts(current_sentence, is_first_sentence))
+                # Create a task but don't await it here
+                task = asyncio.create_task(process_sentence_tts(current_sentence, len(tts_tasks)))
+                tts_tasks.append(task)
                 current_sentence = ""
-                is_first_sentence = False
 
-        # Process any remaining text
+        # Last sentence
         if current_sentence.strip():
-            asyncio.create_task(process_sentence_tts(current_sentence))
+            task = asyncio.create_task(process_sentence_tts(current_sentence, len(tts_tasks)))
+            tts_tasks.append(task)
 
-        logger.info(f"Gemini stream complete for session {session_id}, total chunks: {chunk_count}")
+        # Sequence the results into the queue
+        for task in tts_tasks:
+            result = await task
+            if result:
+                await audio_queue.put(result)
+
+        # Stop worker
+        await audio_queue.put(None)
+        await worker_task
+
+        logger.info(f"Gemini stream complete for session {session_id}")
         
         # Add assistant response to memory
         if full_response:
