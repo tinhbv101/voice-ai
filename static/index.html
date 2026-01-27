@@ -388,9 +388,12 @@
             }
         }
 
+        let audioQueue = [];
+        let isPlaying = false;
+
         function playAudioResponse(audioBase64) {
             try {
-                // Convert base64 to blob
+                // Convert base64 to blob and add to queue
                 const audioData = atob(audioBase64);
                 const arrayBuffer = new ArrayBuffer(audioData.length);
                 const uint8Array = new Uint8Array(arrayBuffer);
@@ -402,25 +405,40 @@
                 const blob = new Blob([uint8Array], { type: 'audio/mpeg' });
                 const audioUrl = URL.createObjectURL(blob);
                 
-                // Create audio element and play
-                const audio = new Audio(audioUrl);
-                audio.play().then(() => {
-                    console.log('Playing audio response');
-                    addMessage('status', '🔊 Playing audio response');
-                }).catch(error => {
-                    console.error('Error playing audio:', error);
-                    addMessage('error', 'Failed to play audio');
-                });
-                
-                // Cleanup URL after playback
-                audio.onended = () => {
-                    URL.revokeObjectURL(audioUrl);
-                };
+                // Add to queue and try to play
+                audioQueue.push(audioUrl);
+                processAudioQueue();
                 
             } catch (error) {
                 console.error('Error processing audio:', error);
                 addMessage('error', 'Failed to process audio response');
             }
+        }
+
+        function processAudioQueue() {
+            if (isPlaying || audioQueue.length === 0) return;
+
+            isPlaying = true;
+            const audioUrl = audioQueue.shift();
+            const audio = new Audio(audioUrl);
+
+            audio.onended = () => {
+                URL.revokeObjectURL(audioUrl);
+                isPlaying = false;
+                processAudioQueue(); // Play next in queue
+            };
+
+            audio.onerror = () => {
+                console.error('Audio playback error');
+                isPlaying = false;
+                processAudioQueue();
+            };
+
+            audio.play().catch(error => {
+                console.error('Error playing audio:', error);
+                isPlaying = false;
+                processAudioQueue();
+            });
         }
 
         function addMessage(type, content) {
