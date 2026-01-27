@@ -52,55 +52,71 @@ class ElevenLabsTTSClient:
             
         self.model = model
 
-    async def synthesize(self, text: str, output_path: str) -> None:
+    async def synthesize(self, text: str, output_path: str, optimize_latency: int = 3) -> None:
         """
-        Synthesize speech and save to file.
+        Synthesize speech and save to file using streaming API.
         
         Args:
             text: Text to synthesize
             output_path: Path to save audio file (MP3 format)
+            optimize_latency: Latency optimization level (0-4)
+                0 - default mode (no optimizations)
+                1 - normal optimizations (~50% improvement)
+                2 - strong optimizations (~75% improvement)
+                3 - max optimizations (default)
+                4 - max + text normalizer off (best latency)
         
         Raises:
             Exception: If synthesis fails
         """
         try:
-            # Generate audio
-            audio_generator = self.client.text_to_speech.convert(
-                voice_id=self.voice_id,
-                text=text,
-                model_id=self.model,
-            )
-            
             # Create output directory if needed
             output_file = Path(output_path)
             output_file.parent.mkdir(parents=True, exist_ok=True)
             
-            # Write audio to file
+            # Use streaming API with latency optimization
+            audio_stream = self.client.text_to_speech.convert(
+                voice_id=self.voice_id,
+                text=text,
+                model_id=self.model,
+                optimize_streaming_latency=optimize_latency,
+                output_format="mp3_44100_128",  # Standard quality
+            )
+            
+            # Write audio chunks to file
             with open(output_path, "wb") as f:
-                for chunk in audio_generator:
+                for chunk in audio_stream:
                     f.write(chunk)
                     
         except Exception as e:
             raise Exception(f"ElevenLabs TTS failed: {str(e)}")
 
-    async def synthesize_stream(self, text: str):
+    async def synthesize_stream(self, text: str, optimize_latency: int = 3):
         """
-        Synthesize speech and return audio chunks (for streaming).
+        Synthesize speech and return audio chunks (for real-time streaming).
         
         Args:
             text: Text to synthesize
+            optimize_latency: Latency optimization level (0-4)
+                0 - default mode
+                1 - normal optimizations (~50% improvement)
+                2 - strong optimizations (~75% improvement)
+                3 - max optimizations (default)
+                4 - max + text normalizer off (best latency)
             
         Yields:
             Audio chunks (bytes)
         """
         try:
-            audio_generator = self.client.text_to_speech.convert(
+            audio_stream = self.client.text_to_speech.convert(
                 voice_id=self.voice_id,
                 text=text,
                 model_id=self.model,
+                optimize_streaming_latency=optimize_latency,
+                output_format="mp3_44100_128",
             )
             
-            for chunk in audio_generator:
+            for chunk in audio_stream:
                 yield chunk
                 
         except Exception as e:

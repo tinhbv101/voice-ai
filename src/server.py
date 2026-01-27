@@ -83,6 +83,7 @@ def get_stt_client() -> FasterWhisperClient:
 
 # Initialize TTS client (singleton)
 tts_client = None
+tts_fallback_client = None  # Fallback to Edge-TTS
 
 def get_tts_client():
     """Get or create TTS client based on config."""
@@ -113,6 +114,18 @@ def get_tts_client():
                 pitch="+25Hz"
             )
     return tts_client
+
+def get_fallback_tts_client():
+    """Get fallback TTS client (always Edge-TTS)."""
+    global tts_fallback_client
+    if tts_fallback_client is None:
+        logger.info("Initializing fallback TTS client (Edge-TTS)...")
+        tts_fallback_client = EdgeTTSClient(
+            voice="vi-VN-HoaiMyNeural",
+            rate="+20%",
+            pitch="+25Hz"
+        )
+    return tts_fallback_client
 
 # Session storage: session_id -> (memory, gemini_client)
 session_storage: dict[str, tuple[ConversationMemory, GeminiClient]] = {}
@@ -217,7 +230,26 @@ async def handle_text_input(session_id: str, text: str):
                 return audio_base64
             except Exception as e:
                 logger.error(f"TTS error: {e}")
-                return None
+                
+                # Fallback to Edge-TTS if primary TTS fails
+                try:
+                    logger.warning(f"Falling back to Edge-TTS for sentence {order_idx}")
+                    fallback_tts = get_fallback_tts_client()
+                    
+                    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
+                        tmp_path = tmp_file.name
+                    
+                    await fallback_tts.synthesize(text_to_speak, tmp_path)
+                    audio_bytes = Path(tmp_path).read_bytes()
+                    audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+                    
+                    try:
+                        Path(tmp_path).unlink()
+                    except: pass
+                    return audio_base64
+                except Exception as fallback_error:
+                    logger.error(f"Fallback TTS also failed: {fallback_error}")
+                    return None
 
         tts_tasks = []
         for chunk in gemini_client.chat_stream(text, history_without_current):
