@@ -67,10 +67,11 @@
         <!-- Connection Status -->
         <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
             <div class="flex items-center justify-between">
-                <div>
+                <div class="flex-1">
                     <h2 class="text-xl font-semibold text-gray-800 mb-2">Connection Status</h2>
                     <p id="connection-status" class="text-gray-600">Disconnected</p>
                     <p id="session-id" class="text-sm text-gray-500 mt-1"></p>
+                    <p id="websocket-url" class="text-xs text-gray-400 mt-1"></p>
                 </div>
                 <div>
                     <button id="connect-btn" onclick="connect()" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg font-medium">
@@ -186,7 +187,13 @@
         let isAIResponding = false;
 
         function connect() {
-            const wsUrl = 'ws://localhost:8000/ws';
+            // Auto-detect WebSocket URL based on current location
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host;  // includes hostname and port
+            const wsUrl = `${protocol}//${host}/ws`;
+            
+            console.log('Connecting to:', wsUrl);
+            document.getElementById('websocket-url').textContent = `WebSocket: ${wsUrl}`;
 
             try {
                 ws = new WebSocket(wsUrl);

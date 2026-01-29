@@ -219,13 +219,14 @@ async def handle_text_input(session_id: str, text: str):
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
                     tmp_path = tmp_file.name
                 
-                # ElevenLabs supports previous_text param
-                if hasattr(tts, 'synthesize') and 'previous_text' in tts.synthesize.__code__.co_varnames:
+                # ElevenLabs supports previous_text and language_code params
+                if hasattr(tts, 'synthesize') and 'language_code' in tts.synthesize.__code__.co_varnames:
                     await tts.synthesize(
                         sentence, 
                         tmp_path,
                         optimize_latency=3,
-                        previous_text=previous_text
+                        previous_text=previous_text,
+                        language_code="vi"  # Vietnamese for better pronunciation
                     )
                 else:
                     # Fallback for other TTS (Edge, OpenAI)
