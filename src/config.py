@@ -16,11 +16,18 @@ class Config:
         """Initialize configuration from environment variables."""
         load_dotenv()
 
-        # Required configuration
-        self.google_api_key = self._get_required_env("GOOGLE_API_KEY")
-
-        # Optional configuration with defaults
-        self.model_name = os.getenv("MODEL_NAME", "gemini-1.5-flash")
+        # LLM Provider configuration
+        self.llm_provider = os.getenv("LLM_PROVIDER", "gemini")  # gemini, openai
+        
+        # API Keys (at least one required)
+        self.google_api_key = os.getenv("GOOGLE_API_KEY")
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        
+        # LLM Model settings
+        self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        self.openai_llm_model = os.getenv("OPENAI_LLM_MODEL", "gpt-4o-mini")
+        
+        # General LLM settings
         self.max_memory_messages = self._get_int_env(
             "MAX_MEMORY_MESSAGES", default=10
         )
@@ -29,11 +36,11 @@ class Config:
         # TTS configuration
         self.tts_provider = os.getenv("TTS_PROVIDER", "elevenlabs")  # elevenlabs, openai, edge
         self.elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY")
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self.openai_tts_api_key = os.getenv("OPENAI_API_KEY")  # Same key for TTS
         
         # TTS settings
-        self.elevenlabs_voice = os.getenv("ELEVENLABS_VOICE", "elli")  # Young, energetic anime vibe
-        self.elevenlabs_model = os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2")  # Faster model
+        self.elevenlabs_voice = os.getenv("ELEVENLABS_VOICE", "rachel")  # Calm, natural (eleven_multilingual_v2)
+        self.elevenlabs_model = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")  # Supports all features
         self.openai_voice = os.getenv("OPENAI_VOICE", "nova")
         self.openai_model = os.getenv("OPENAI_MODEL", "tts-1")
 
@@ -78,6 +85,20 @@ class Config:
         if self.max_memory_messages <= 0:
             raise ConfigError("MAX_MEMORY_MESSAGES must be positive")
 
+        # Validate LLM provider
+        valid_llm_providers = ["gemini", "openai"]
+        if self.llm_provider not in valid_llm_providers:
+            raise ConfigError(
+                f"LLM_PROVIDER must be one of: {', '.join(valid_llm_providers)}"
+            )
+
+        # Validate API keys for selected LLM provider
+        if self.llm_provider == "gemini" and not self.google_api_key:
+            raise ConfigError("GOOGLE_API_KEY is required when LLM_PROVIDER=gemini")
+
+        if self.llm_provider == "openai" and not self.openai_api_key:
+            raise ConfigError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+
         # Validate TTS provider
         valid_providers = ["edge", "openai", "elevenlabs"]
         if self.tts_provider not in valid_providers:
@@ -85,9 +106,9 @@ class Config:
                 f"TTS_PROVIDER must be one of: {', '.join(valid_providers)}"
             )
 
-        # Validate API keys for selected provider
+        # Validate API keys for selected TTS provider
         if self.tts_provider == "elevenlabs" and not self.elevenlabs_api_key:
             raise ConfigError("ELEVENLABS_API_KEY is required when TTS_PROVIDER=elevenlabs")
 
-        if self.tts_provider == "openai" and not self.openai_api_key:
+        if self.tts_provider == "openai" and not self.openai_tts_api_key:
             raise ConfigError("OPENAI_API_KEY is required when TTS_PROVIDER=openai")

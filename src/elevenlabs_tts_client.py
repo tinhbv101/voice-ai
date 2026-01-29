@@ -52,9 +52,17 @@ class ElevenLabsTTSClient:
             
         self.model = model
 
-    async def synthesize(self, text: str, output_path: str, optimize_latency: int = 3) -> None:
+    async def synthesize(
+        self, 
+        text: str, 
+        output_path: str, 
+        optimize_latency: int = 3,
+        previous_text: Optional[str] = None,
+        next_text: Optional[str] = None,
+        language_code: Optional[str] = "vi"
+    ) -> None:
         """
-        Synthesize speech and save to file using streaming API.
+        Synthesize speech and save to file.
         
         Args:
             text: Text to synthesize
@@ -65,6 +73,9 @@ class ElevenLabsTTSClient:
                 2 - strong optimizations (~75% improvement)
                 3 - max optimizations (default)
                 4 - max + text normalizer off (best latency)
+            previous_text: Text that came before (for continuity)
+            next_text: Text that comes after (for continuity)
+            language_code: Language code (ISO 639-1) for better pronunciation (default: "vi" for Vietnamese)
         
         Raises:
             Exception: If synthesis fails
@@ -74,14 +85,30 @@ class ElevenLabsTTSClient:
             output_file = Path(output_path)
             output_file.parent.mkdir(parents=True, exist_ok=True)
             
-            # Use streaming API with latency optimization
-            audio_stream = self.client.text_to_speech.convert(
-                voice_id=self.voice_id,
-                text=text,
-                model_id=self.model,
-                optimize_streaming_latency=optimize_latency,
-                output_format="mp3_44100_128",  # Standard quality
-            )
+            # Build request parameters
+            kwargs = {
+                "voice_id": self.voice_id,
+                "text": text,
+                "model_id": self.model,
+                "output_format": "mp3_44100_128",
+            }
+            
+            # Add language_code for better pronunciation (works with all models)
+            if language_code:
+                kwargs["language_code"] = language_code
+            
+            # eleven_v3 doesn't support optimize_streaming_latency, previous_text, next_text
+            # Only add these for older models
+            if not self.model.startswith("eleven_v3"):
+                if optimize_latency > 0:
+                    kwargs["optimize_streaming_latency"] = optimize_latency
+                if previous_text:
+                    kwargs["previous_text"] = previous_text
+                if next_text:
+                    kwargs["next_text"] = next_text
+            
+            # Use standard text-to-speech API
+            audio_stream = self.client.text_to_speech.convert(**kwargs)
             
             # Write audio chunks to file
             with open(output_path, "wb") as f:
@@ -90,37 +117,6 @@ class ElevenLabsTTSClient:
                     
         except Exception as e:
             raise Exception(f"ElevenLabs TTS failed: {str(e)}")
-
-    async def synthesize_stream(self, text: str, optimize_latency: int = 3):
-        """
-        Synthesize speech and return audio chunks (for real-time streaming).
-        
-        Args:
-            text: Text to synthesize
-            optimize_latency: Latency optimization level (0-4)
-                0 - default mode
-                1 - normal optimizations (~50% improvement)
-                2 - strong optimizations (~75% improvement)
-                3 - max optimizations (default)
-                4 - max + text normalizer off (best latency)
-            
-        Yields:
-            Audio chunks (bytes)
-        """
-        try:
-            audio_stream = self.client.text_to_speech.convert(
-                voice_id=self.voice_id,
-                text=text,
-                model_id=self.model,
-                optimize_streaming_latency=optimize_latency,
-                output_format="mp3_44100_128",
-            )
-            
-            for chunk in audio_stream:
-                yield chunk
-                
-        except Exception as e:
-            raise Exception(f"ElevenLabs TTS streaming failed: {str(e)}")
 
     def get_available_voices(self) -> list:
         """

@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VoiceAI - Phase 4</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Silero VAD for Voice Activity Detection -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.7/dist/bundle.min.js"></script>
     <style>
         .message-user {
             background: #3b82f6;
@@ -40,6 +43,17 @@
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
+        .vad-listening {
+            animation: glow 2s ease-in-out infinite;
+        }
+        @keyframes glow {
+            0%, 100% {
+                box-shadow: 0 0 5px rgba(147, 51, 234, 0.5);
+            }
+            50% {
+                box-shadow: 0 0 20px rgba(147, 51, 234, 0.8), 0 0 30px rgba(147, 51, 234, 0.6);
+            }
+        }
     </style>
 </head>
 <body class="bg-gray-100">
@@ -72,19 +86,45 @@
         <!-- Audio Controls -->
         <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
             <h2 class="text-xl font-semibold text-gray-800 mb-4">🎤 Voice Input</h2>
-            <div class="flex gap-2 items-center">
-                <button
-                    id="record-btn"
-                    onclick="toggleRecording()"
-                    class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-3 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                    disabled
-                >
-                    🎤 Start Recording
-                </button>
-                <div id="recording-indicator" class="hidden">
-                    <span class="recording text-red-600 font-semibold">● Recording...</span>
+
+            <!-- Voice Chat Mode (VAD) -->
+            <div class="mb-4 p-4 bg-gradient-to-r from-purple-50 to-blue-50 rounded-lg border-2 border-purple-200">
+                <div class="flex items-center justify-between mb-2">
+                    <div>
+                        <h3 class="font-semibold text-gray-800">🎙️ Voice Chat Mode (Auto VAD)</h3>
+                        <p class="text-sm text-gray-600">Hands-free conversation - auto-detects when you speak!</p>
+                    </div>
+                    <button
+                        id="voice-chat-btn"
+                        onclick="toggleVoiceChat()"
+                        class="bg-purple-500 hover:bg-purple-600 text-white px-6 py-3 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                        disabled
+                    >
+                        🚀 Start Voice Chat
+                    </button>
                 </div>
-                <div id="audio-status" class="text-sm text-gray-600 ml-4"></div>
+                <div id="vad-status" class="text-sm font-medium text-gray-700 mt-2 hidden">
+                    <span id="vad-status-text">Initializing VAD...</span>
+                </div>
+            </div>
+
+            <!-- Manual Recording (Old way) -->
+            <div class="p-4 bg-gray-50 rounded-lg">
+                <h3 class="font-semibold text-gray-700 mb-2">Manual Recording</h3>
+                <div class="flex gap-2 items-center">
+                    <button
+                        id="record-btn"
+                        onclick="toggleRecording()"
+                        class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-3 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled
+                    >
+                        🎤 Start Recording
+                    </button>
+                    <div id="recording-indicator" class="hidden">
+                        <span class="recording text-red-600 font-semibold">● Recording...</span>
+                    </div>
+                    <div id="audio-status" class="text-sm text-gray-600 ml-4"></div>
+                </div>
             </div>
         </div>
 
@@ -131,12 +171,19 @@
         let ws = null;
         let sessionId = null;
         let currentAssistantMessage = null;
-        
+
         // Audio recording
         let mediaRecorder = null;
         let audioChunks = [];
         let isRecording = false;
         let audioStream = null;
+
+        // Voice Chat Mode (VAD)
+        let vad = null;
+        let isVoiceChatMode = false;
+        let vadAudioChunks = [];
+        let isSpeaking = false;
+        let isAIResponding = false;
 
         function connect() {
             const wsUrl = 'ws://localhost:8000/ws';
@@ -149,6 +196,7 @@
                     document.getElementById('message-input').disabled = false;
                     document.getElementById('send-btn').disabled = false;
                     document.getElementById('record-btn').disabled = false;
+                    document.getElementById('voice-chat-btn').disabled = false;
                 };
 
                 ws.onmessage = (event) => {
@@ -160,6 +208,7 @@
                     document.getElementById('message-input').disabled = true;
                     document.getElementById('send-btn').disabled = true;
                     document.getElementById('record-btn').disabled = true;
+                    document.getElementById('voice-chat-btn').disabled = true;
                     ws = null;
                     sessionId = null;
                 };
@@ -179,9 +228,173 @@
             if (isRecording) {
                 stopRecording();
             }
+            if (isVoiceChatMode) {
+                stopVoiceChat();
+            }
             if (ws) {
                 ws.close();
             }
+        }
+
+        async function toggleVoiceChat() {
+            if (isVoiceChatMode) {
+                await stopVoiceChat();
+            } else {
+                await startVoiceChat();
+            }
+        }
+
+        async function startVoiceChat() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('Please connect to the server first');
+                return;
+            }
+
+            try {
+                updateVADStatus('Initializing VAD...', 'text-blue-600');
+                document.getElementById('vad-status').classList.remove('hidden');
+
+                // Initialize VAD
+                vad = await window.vad.MicVAD.new({
+                    onSpeechStart: () => {
+                        console.log('Speech started');
+                        isSpeaking = true;
+                        vadAudioChunks = [];
+                        updateVADStatus('🎤 Listening... (Speak now)', 'text-green-600');
+                        addMessage('status', '🎤 Listening...');
+                    },
+                    onSpeechEnd: async (audio) => {
+                        console.log('Speech ended, processing...');
+                        isSpeaking = false;
+                        updateVADStatus('⏳ Processing speech...', 'text-yellow-600');
+
+                        // Convert Float32Array to audio blob
+                        const audioBlob = await convertAudioToBlob(audio);
+
+                        // Send directly as complete audio (no streaming)
+                        await sendCompleteAudioToServer(audioBlob);
+                    },
+                    onVADMisfire: () => {
+                        console.log('VAD misfire - false positive');
+                        isSpeaking = false;
+                        if (isVoiceChatMode && !isAIResponding) {
+                            updateVADStatus('👂 Waiting for speech...', 'text-gray-600');
+                        }
+                    },
+                    positiveSpeechThreshold: 0.8,
+                    negativeSpeechThreshold: 0.5,
+                    redemptionFrames: 8,
+                    preSpeechPadFrames: 1,
+                    minSpeechFrames: 4,
+                });
+
+                await vad.start();
+                isVoiceChatMode = true;
+                isAIResponding = false;
+
+                // Update UI
+                document.getElementById('voice-chat-btn').textContent = '⏹ Stop Voice Chat';
+                document.getElementById('voice-chat-btn').classList.remove('bg-purple-500', 'hover:bg-purple-600');
+                document.getElementById('voice-chat-btn').classList.add('bg-red-500', 'hover:bg-red-600');
+                document.getElementById('record-btn').disabled = true;
+                updateVADStatus('👂 Waiting for speech...', 'text-gray-600');
+
+                addMessage('status', '🚀 Voice Chat Mode activated! Speak naturally - I\'ll auto-detect your voice.');
+
+            } catch (error) {
+                console.error('Failed to start Voice Chat:', error);
+                addMessage('error', `Failed to start Voice Chat: ${error.message}`);
+                updateVADStatus('Error initializing VAD', 'text-red-600');
+            }
+        }
+
+        async function stopVoiceChat() {
+            if (vad) {
+                try {
+                    // Try to pause VAD (stop listening)
+                    if (typeof vad.pause === 'function') {
+                        vad.pause();
+                    }
+                    // Some versions use destroy instead
+                    if (typeof vad.destroy === 'function') {
+                        await vad.destroy();
+                    }
+                } catch (error) {
+                    console.error('Error stopping VAD:', error);
+                }
+                vad = null;
+            }
+
+            isVoiceChatMode = false;
+            isSpeaking = false;
+            isAIResponding = false;
+
+            // Update UI
+            document.getElementById('voice-chat-btn').textContent = '🚀 Start Voice Chat';
+            document.getElementById('voice-chat-btn').classList.remove('bg-red-500', 'hover:bg-red-600');
+            document.getElementById('voice-chat-btn').classList.add('bg-purple-500', 'hover:bg-purple-600');
+            document.getElementById('record-btn').disabled = false;
+            document.getElementById('vad-status').classList.add('hidden');
+
+            addMessage('status', '⏹ Voice Chat Mode deactivated');
+        }
+
+        function updateVADStatus(text, colorClass) {
+            const statusEl = document.getElementById('vad-status-text');
+            const statusContainer = document.getElementById('vad-status');
+
+            statusEl.textContent = text;
+            statusEl.className = colorClass;
+
+            // Add glow effect when listening or speaking
+            if (text.includes('Listening') || text.includes('Speak now')) {
+                statusContainer.classList.add('vad-listening');
+            } else {
+                statusContainer.classList.remove('vad-listening');
+            }
+        }
+
+        async function convertAudioToBlob(float32Array) {
+            // Convert Float32Array to WAV format
+            const sampleRate = 16000;
+            const numChannels = 1;
+            const bitsPerSample = 16;
+
+            const dataLength = float32Array.length * (bitsPerSample / 8);
+            const buffer = new ArrayBuffer(44 + dataLength);
+            const view = new DataView(buffer);
+
+            // WAV header
+            const writeString = (offset, string) => {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            };
+
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + dataLength, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * numChannels * (bitsPerSample / 8), true);
+            view.setUint16(32, numChannels * (bitsPerSample / 8), true);
+            view.setUint16(34, bitsPerSample, true);
+            writeString(36, 'data');
+            view.setUint32(40, dataLength, true);
+
+            // Convert Float32Array to Int16Array
+            let offset = 44;
+            for (let i = 0; i < float32Array.length; i++) {
+                const sample = Math.max(-1, Math.min(1, float32Array[i]));
+                const int16Sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+                view.setInt16(offset, int16Sample, true);
+                offset += 2;
+            }
+
+            return new Blob([buffer], { type: 'audio/wav' });
         }
 
         async function toggleRecording() {
@@ -282,7 +495,7 @@
                 // Convert blob to array buffer
                 const arrayBuffer = await audioBlob.arrayBuffer();
                 const uint8Array = new Uint8Array(arrayBuffer);
-                
+
                 // Convert to base64
                 let binary = '';
                 const len = uint8Array.byteLength;
@@ -315,6 +528,42 @@
                 console.error('Failed to send audio:', error);
                 addMessage('error', `Failed to send audio: ${error.message}`);
                 document.getElementById('audio-status').textContent = 'Error sending audio';
+            }
+        }
+
+        async function sendCompleteAudioToServer(audioBlob) {
+            try {
+                // Convert blob to array buffer
+                const arrayBuffer = await audioBlob.arrayBuffer();
+                const uint8Array = new Uint8Array(arrayBuffer);
+
+                // Convert to base64
+                let binary = '';
+                const len = uint8Array.byteLength;
+                for (let i = 0; i < len; i++) {
+                    binary += String.fromCharCode(uint8Array[i]);
+                }
+                const base64Audio = btoa(binary);
+
+                console.log(`Sending complete audio: ${audioBlob.size} bytes`);
+
+                // Send as complete audio directly (VAD mode)
+                const audioMsg = {
+                    type: 'vad_audio',
+                    data: {
+                        audio: base64Audio,
+                        format: 'wav'
+                    },
+                    session_id: sessionId
+                };
+                ws.send(JSON.stringify(audioMsg));
+
+            } catch (error) {
+                console.error('Failed to send VAD audio:', error);
+                addMessage('error', `Failed to send audio: ${error.message}`);
+                if (isVoiceChatMode) {
+                    updateVADStatus('Error sending audio', 'text-red-600');
+                }
             }
         }
 
@@ -367,6 +616,10 @@
                 case 'transcript':
                     // Show transcribed text
                     addMessage('transcript', `🎤 "${message.data.transcript}"`);
+                    if (isVoiceChatMode) {
+                        updateVADStatus('💭 AI is thinking...', 'text-blue-600');
+                        isAIResponding = true;
+                    }
                     break;
 
                 case 'audio_response':
@@ -393,7 +646,7 @@
 
         function playAudioResponse(audioBase64) {
             try {
-                // Convert base64 to blob and add to queue
+                // Convert base64 to blob
                 const audioData = atob(audioBase64);
                 const arrayBuffer = new ArrayBuffer(audioData.length);
                 const uint8Array = new Uint8Array(arrayBuffer);
@@ -405,7 +658,9 @@
                 const blob = new Blob([uint8Array], { type: 'audio/mpeg' });
                 const audioUrl = URL.createObjectURL(blob);
                 
-                // Add to queue and try to play
+                console.log(`Received audio: ${(audioData.length / 1024).toFixed(2)} KB`);
+                
+                // Add to queue and play
                 audioQueue.push(audioUrl);
                 processAudioQueue();
                 
@@ -422,20 +677,34 @@
             const audioUrl = audioQueue.shift();
             const audio = new Audio(audioUrl);
 
+            console.log(`Playing audio (${audioQueue.length} remaining in queue)`);
+
             audio.onended = () => {
                 URL.revokeObjectURL(audioUrl);
                 isPlaying = false;
-                processAudioQueue(); // Play next in queue
+                console.log('Audio finished');
+
+                // If queue is empty and Voice Chat Mode is active, restart listening
+                if (audioQueue.length === 0 && isVoiceChatMode) {
+                    isAIResponding = false;
+                    updateVADStatus('👂 Waiting for speech...', 'text-gray-600');
+                    addMessage('status', '👂 Ready - speak when you\'re ready!');
+                } else {
+                    // Play next immediately
+                    processAudioQueue();
+                }
             };
 
-            audio.onerror = () => {
-                console.error('Audio playback error');
+            audio.onerror = (e) => {
+                console.error('Audio playback error:', e);
+                URL.revokeObjectURL(audioUrl);
                 isPlaying = false;
                 processAudioQueue();
             };
 
             audio.play().catch(error => {
                 console.error('Error playing audio:', error);
+                URL.revokeObjectURL(audioUrl);
                 isPlaying = false;
                 processAudioQueue();
             });

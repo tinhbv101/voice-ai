@@ -4,7 +4,7 @@ import logging
 import asyncio
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +25,7 @@ from src.websocket_protocol import (
 )
 from src.audio_streaming import AudioStreamManager
 from src.gemini_client import GeminiClient, GeminiError
+from src.openai_llm_client import OpenAILLMClient, OpenAIError
 from src.memory import ConversationMemory
 from src.persona import get_system_instruction
 from src.stt_client import FasterWhisperClient, STTError
@@ -127,11 +128,11 @@ def get_fallback_tts_client():
         )
     return tts_fallback_client
 
-# Session storage: session_id -> (memory, gemini_client)
-session_storage: dict[str, tuple[ConversationMemory, GeminiClient]] = {}
+# Session storage: session_id -> (memory, llm_client)
+session_storage: dict[str, tuple[ConversationMemory, Any]] = {}
 
 
-def get_or_create_session(session_id: str) -> tuple[ConversationMemory, GeminiClient]:
+def get_or_create_session(session_id: str) -> tuple[ConversationMemory, Any]:
     """
     Get or create session components.
 
@@ -139,7 +140,7 @@ def get_or_create_session(session_id: str) -> tuple[ConversationMemory, GeminiCl
         session_id: Session identifier
 
     Returns:
-        Tuple of (memory, gemini_client)
+        Tuple of (memory, llm_client) - client can be GeminiClient or OpenAILLMClient
     """
     if session_id not in session_storage:
         # Load configuration
@@ -148,151 +149,173 @@ def get_or_create_session(session_id: str) -> tuple[ConversationMemory, GeminiCl
         # Create memory
         memory = ConversationMemory(max_messages=config.max_memory_messages)
 
-        # Create Gemini client
+        # Create LLM client based on provider
         system_instruction = get_system_instruction()
-        gemini_client = GeminiClient(
-            api_key=config.google_api_key,
-            model_name=config.model_name,
-            system_instruction=system_instruction,
-            temperature=config.temperature
-        )
+        
+        if config.llm_provider == "openai":
+            logger.info("Creating OpenAI LLM client")
+            llm_client = OpenAILLMClient(
+                api_key=config.openai_api_key,
+                model_name=config.openai_llm_model,
+                system_instruction=system_instruction,
+                temperature=config.temperature
+            )
+        else:  # gemini (default)
+            logger.info("Creating Gemini client")
+            llm_client = GeminiClient(
+                api_key=config.google_api_key,
+                model_name=config.gemini_model,
+                system_instruction=system_instruction,
+                temperature=config.temperature
+            )
 
-        session_storage[session_id] = (memory, gemini_client)
-        logger.info(f"Created new session: {session_id}")
+        session_storage[session_id] = (memory, llm_client)
+        logger.info(f"Created new session: {session_id} with {config.llm_provider}")
 
     return session_storage[session_id]
 
 
 async def handle_text_input(session_id: str, text: str):
     """
-    Handle text input from client.
+    Handle text input from client with streaming TTS.
 
     Args:
         session_id: Session identifier
         text: User text input
     """
     logger.info(f"handle_text_input called for session {session_id}")
-    memory, gemini_client = get_or_create_session(session_id)
+    memory, llm_client = get_or_create_session(session_id)
 
     # Add user message to memory
     memory = memory.add_message("user", text)
-    session_storage[session_id] = (memory, gemini_client)
+    session_storage[session_id] = (memory, llm_client)
 
     # Get conversation history
     history = memory.get_history()
     history_without_current = history[:-1]
 
     try:
-        # Stream response from Gemini
+        # Stream response from LLM (Gemini or OpenAI)
         full_response = ""
         current_sentence = ""
+        sentences_for_context = []  # Keep for continuity
         chunk_count = 0
         
-        logger.info(f"Starting Gemini stream for session {session_id}")
+        logger.info(f"Starting LLM stream for session {session_id}")
         
-        # Queue to ensure audio is sent in correct order
-        audio_queue = asyncio.Queue()
-        
-        async def send_audio_worker():
-            while True:
-                audio_base64 = await audio_queue.get()
-                if audio_base64 is None: # Sentinel to stop
-                    break
-                audio_msg = create_audio_response_message(audio_base64, session_id)
-                await connection_manager.send_message(session_id, audio_msg)
-                audio_queue.task_done()
-                # Give a tiny gap between clips for natural playback
-                await asyncio.sleep(0.1)
-
-        # Start the worker to send audio in order
-        worker_task = asyncio.create_task(send_audio_worker())
-        
-        # Helper to process and ENQUEUE audio
-        async def process_sentence_tts(text_to_speak: str, order_idx: int):
-            if not text_to_speak.strip():
+        # Helper to generate and send audio for a sentence
+        async def stream_sentence_audio(sentence: str, previous_sentences: list):
+            if not sentence.strip():
                 return
+                
             try:
-                logger.info(f"Processing sentence {order_idx}: {text_to_speak[:30]}...")
+                logger.info(f"Generating audio for sentence: {sentence[:50]}...")
                 tts = get_tts_client()
                 
+                # Get previous text for continuity (last 2 sentences)
+                previous_text = " ".join(previous_sentences[-2:]) if previous_sentences else None
+                
+                # Generate audio to temp file
                 with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
                     tmp_path = tmp_file.name
                 
-                await tts.synthesize(text_to_speak, tmp_path)
+                # ElevenLabs supports previous_text param
+                if hasattr(tts, 'synthesize') and 'previous_text' in tts.synthesize.__code__.co_varnames:
+                    await tts.synthesize(
+                        sentence, 
+                        tmp_path,
+                        optimize_latency=3,
+                        previous_text=previous_text
+                    )
+                else:
+                    # Fallback for other TTS (Edge, OpenAI)
+                    await tts.synthesize(sentence, tmp_path)
+                
+                # Read and send audio
                 audio_bytes = Path(tmp_path).read_bytes()
                 audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
                 
-                # Instead of sending directly, we'd need a way to keep order
-                # For simplicity in this fix, we'll store tasks and wait for them in order
+                audio_msg = create_audio_response_message(audio_base64, session_id)
+                await connection_manager.send_message(session_id, audio_msg)
+                logger.info(f"Sent audio ({len(audio_bytes)} bytes)")
+                
+                # Cleanup
                 try:
                     Path(tmp_path).unlink()
                 except: pass
-                return audio_base64
+                    
             except Exception as e:
                 logger.error(f"TTS error: {e}")
                 
-                # Fallback to Edge-TTS if primary TTS fails
+                # Fallback to Edge-TTS
                 try:
-                    logger.warning(f"Falling back to Edge-TTS for sentence {order_idx}")
+                    logger.warning("Falling back to Edge-TTS")
                     fallback_tts = get_fallback_tts_client()
                     
                     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
                         tmp_path = tmp_file.name
                     
-                    await fallback_tts.synthesize(text_to_speak, tmp_path)
+                    await fallback_tts.synthesize(sentence, tmp_path)
                     audio_bytes = Path(tmp_path).read_bytes()
                     audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+                    
+                    audio_msg = create_audio_response_message(audio_base64, session_id)
+                    await connection_manager.send_message(session_id, audio_msg)
+                    logger.info("Fallback TTS succeeded")
                     
                     try:
                         Path(tmp_path).unlink()
                     except: pass
-                    return audio_base64
+                    
                 except Exception as fallback_error:
                     logger.error(f"Fallback TTS also failed: {fallback_error}")
-                    return None
-
+        
+        # Process LLM stream and split into sentences
         tts_tasks = []
-        for chunk in gemini_client.chat_stream(text, history_without_current):
+        for chunk in llm_client.chat_stream(text, history_without_current):
             chunk_count += 1
             full_response += chunk
             current_sentence += chunk
             
+            # Send text chunk to client
             response_msg = create_text_response(chunk, session_id)
             await connection_manager.send_message(session_id, response_msg)
             
-            if any(punct in chunk for punct in [".", "!", "?", "\n", "。", "！", "？", ":", "："]):
-                # Create a task but don't await it here
-                task = asyncio.create_task(process_sentence_tts(current_sentence, len(tts_tasks)))
-                tts_tasks.append(task)
+            # Check for sentence boundaries
+            if any(punct in chunk for punct in [".", "!", "?", "\n", "。", "！", "？"]):
+                sentence_to_speak = current_sentence.strip()
+                if sentence_to_speak:
+                    # Create task for TTS (parallel processing)
+                    task = asyncio.create_task(
+                        stream_sentence_audio(sentence_to_speak, sentences_for_context.copy())
+                    )
+                    tts_tasks.append(task)
+                    sentences_for_context.append(sentence_to_speak)
                 current_sentence = ""
-
-        # Last sentence
+        
+        # Handle last incomplete sentence
         if current_sentence.strip():
-            task = asyncio.create_task(process_sentence_tts(current_sentence, len(tts_tasks)))
+            task = asyncio.create_task(
+                stream_sentence_audio(current_sentence.strip(), sentences_for_context.copy())
+            )
             tts_tasks.append(task)
-
-        # Sequence the results into the queue
-        for task in tts_tasks:
-            result = await task
-            if result:
-                await audio_queue.put(result)
-
-        # Stop worker
-        await audio_queue.put(None)
-        await worker_task
-
-        logger.info(f"Gemini stream complete for session {session_id}")
+        
+        # Wait for all TTS tasks to complete
+        if tts_tasks:
+            await asyncio.gather(*tts_tasks, return_exceptions=True)
+        
+        logger.info(f"LLM stream complete for session {session_id}")
         
         # Add assistant response to memory
         if full_response:
             memory = memory.add_message("model", full_response)
-            session_storage[session_id] = (memory, gemini_client)
+            session_storage[session_id] = (memory, llm_client)
             logger.info(f"Added response to memory for session {session_id}")
         else:
-            logger.warning(f"Empty response from Gemini for session {session_id}")
+            logger.warning(f"Empty response from LLM for session {session_id}")
 
-    except GeminiError as e:
-        logger.error(f"Gemini error for session {session_id}: {e}")
+    except (GeminiError, OpenAIError) as e:
+        logger.error(f"LLM error for session {session_id}: {e}")
         error_msg = create_error_message(str(e), session_id)
         await connection_manager.send_message(session_id, error_msg)
     except Exception as e:
@@ -345,6 +368,60 @@ async def handle_start_recording(session_id: str):
 
     status_msg = create_status_message("Recording started", session_id)
     await connection_manager.send_message(session_id, status_msg)
+
+
+async def handle_vad_audio(session_id: str, audio_base64: str):
+    """
+    Handle complete audio from VAD (Voice Activity Detection).
+
+    Args:
+        session_id: Session identifier
+        audio_base64: Base64-encoded audio data
+    """
+    try:
+        # Decode base64 audio
+        audio_data = base64.b64decode(audio_base64)
+        logger.info(f"Received VAD audio: {len(audio_data)} bytes for session {session_id}")
+
+        status_msg = create_status_message(
+            f"Processing VAD audio: {len(audio_data)} bytes",
+            session_id
+        )
+        await connection_manager.send_message(session_id, status_msg)
+
+        # Process audio with STT
+        if len(audio_data) > 0:
+            try:
+                # Get STT client
+                stt = get_stt_client()
+
+                # Transcribe audio
+                result = await stt.transcribe_audio_bytes(
+                    audio_data,
+                    language="vi",  # Vietnamese
+                    vad_filter=True
+                )
+
+                transcript_text = result["text"]
+                logger.info(f"VAD Transcription: {transcript_text}")
+
+                # Send transcript to client
+                transcript_msg = create_transcript_message(transcript_text, session_id)
+                await connection_manager.send_message(session_id, transcript_msg)
+
+                # Process as text input (trigger LLM response)
+                if transcript_text.strip():
+                    await handle_text_input(session_id, transcript_text)
+
+            except STTError as e:
+                logger.error(f"STT error for VAD audio {session_id}: {e}")
+                error_msg = create_error_message(f"STT error: {str(e)}", session_id)
+                await connection_manager.send_message(session_id, error_msg)
+
+    except Exception as e:
+        logger.error(f"Error handling VAD audio for session {session_id}: {e}")
+        error_msg = create_error_message(f"Failed to process VAD audio: {str(e)}", session_id)
+        await connection_manager.send_message(session_id, error_msg)
 
 
 async def handle_stop_recording(session_id: str):
@@ -506,6 +583,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 elif message.type == MessageType.STOP_RECORDING:
                     await handle_stop_recording(session_id)
+
+                elif message.type == MessageType.VAD_AUDIO:
+                    audio = message.data.get("audio")
+                    await handle_vad_audio(session_id, audio)
 
                 elif message.type == MessageType.PING:
                     pong_msg = WebSocketMessage(

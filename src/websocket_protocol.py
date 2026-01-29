@@ -14,6 +14,7 @@ class MessageType(str, Enum):
     AUDIO_CHUNK = "audio_chunk"        # Audio data chunk
     START_RECORDING = "start_recording"  # Start audio recording
     STOP_RECORDING = "stop_recording"    # Stop audio recording
+    VAD_AUDIO = "vad_audio"            # Complete audio from VAD (Voice Activity Detection)
 
     # Server to Client
     TEXT_RESPONSE = "text_response"    # AI text response (streaming)

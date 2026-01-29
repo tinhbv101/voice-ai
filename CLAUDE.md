@@ -83,19 +83,94 @@ Phase 1 has been fully implemented with the following components:
 
 ```bash
 # Setup (first time)
-poetry install
-cp .env.example .env
-# Edit .env and add your GOOGLE_API_KEY
+poetry install  # or: pip install -r requirements.txt
+cp env.example .env
 
-# Run CLI
-poetry run voiceai
+# Edit .env and add your API keys:
+# For LLM:
+#   - Set LLM_PROVIDER=openai or gemini
+#   - Add OPENAI_API_KEY or GOOGLE_API_KEY
+# For TTS (optional):
+#   - Set TTS_PROVIDER=elevenlabs for streaming (recommended)
+#   - Add ELEVENLABS_API_KEY
 
-# Run tests
-poetry run pytest
+# Ensure venv is activated and dependencies installed
+source venv/bin/activate
+pip install -r requirements.txt
 
-# Run with coverage
-poetry run pytest --cov=src tests/
+# Run WebSocket server
+uvicorn src.server:app --reload --host 0.0.0.0 --port 8000
+
+# Or with Python
+python -m uvicorn src.server:app --reload --host 0.0.0.0 --port 8000
+
+# Open web client
+open http://localhost:8000
+
+# Run STT tests
+pytest tests/test_stt_client.py -v
 ```
+
+### OpenAI Setup (Recommended for Hackathon)
+
+**Get API Key**:
+1. Sign up at https://platform.openai.com
+2. Get API key from https://platform.openai.com/api-keys
+3. Free tier: $5 credit for new accounts
+
+**Configure `.env`**:
+```bash
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your_api_key_here
+OPENAI_LLM_MODEL=gpt-4o-mini  # Fast & cheap ($0.15/1M tokens)
+
+# Optional: Use same key for TTS
+TTS_PROVIDER=openai
+OPENAI_VOICE=nova  # Female voice
+```
+
+**Pricing** (gpt-4o-mini):
+- Input: $0.15 / 1M tokens
+- Output: $0.60 / 1M tokens
+- ~1000 conversations = $1 (very cheap!)
+
+### Gemini Setup (Alternative, Free Tier)
+
+**Get API Key**:
+1. Visit https://aistudio.google.com/app/apikey
+2. Free tier: 15 requests/minute, 1500 requests/day
+
+**Configure `.env`**:
+```bash
+LLM_PROVIDER=gemini
+GOOGLE_API_KEY=your_api_key_here
+GEMINI_MODEL=gemini-1.5-flash  # Fast & free
+```
+
+### ElevenLabs Streaming Setup
+
+**Get API Key**:
+1. Sign up at https://elevenlabs.io
+2. Free tier: 10,000 characters/month (enough for testing)
+3. Get API key from https://elevenlabs.io/app/settings/api
+
+**Configure `.env`**:
+```bash
+TTS_PROVIDER=elevenlabs
+ELEVENLABS_API_KEY=your_api_key_here
+ELEVENLABS_VOICE=rachel  # or: bella, elli, domi (female), adam, antoni (male)
+ELEVENLABS_MODEL=eleven_multilingual_v2  # Best quality, supports Vietnamese
+```
+
+**Voice Presets**:
+- `rachel` - Calm, natural female (default)
+- `bella` - Soft, gentle female
+- `elli` - Young, energetic female
+- `domi` - Strong, confident female
+- `adam` - Deep, resonant male
+- `antoni` - Warm, friendly male
+
+Or use custom voice ID from your ElevenLabs account.
 
 ### Architecture Notes
 
@@ -564,13 +639,66 @@ tests/
 
 ### Configuration
 
+**Environment Variables** (`.env`):
+```bash
+# ===== LLM Configuration =====
+LLM_PROVIDER=openai  # Options: openai, gemini (default: gemini)
+
+# Gemini (Google AI)
+GOOGLE_API_KEY=your_gemini_api_key
+GEMINI_MODEL=gemini-1.5-flash  # or gemini-1.5-pro, gemini-2.0-flash-exp
+
+# OpenAI
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_LLM_MODEL=gpt-4o-mini  # or gpt-4o, gpt-4-turbo, gpt-3.5-turbo
+
+# General LLM settings
+TEMPERATURE=0.7
+MAX_MEMORY_MESSAGES=10
+
+# ===== TTS Configuration =====
+TTS_PROVIDER=elevenlabs  # Options: elevenlabs, openai, edge (default: edge)
+
+# ElevenLabs TTS (for streaming)
+ELEVENLABS_API_KEY=your_elevenlabs_api_key
+ELEVENLABS_VOICE=elli  # Presets: rachel, bella, elli, domi, adam, antoni
+ELEVENLABS_MODEL=eleven_turbo_v2  # or eleven_multilingual_v2 (higher quality)
+
+# OpenAI TTS (alternative)
+OPENAI_VOICE=nova  # Options: alloy, echo, fable, onyx, nova, shimmer
+OPENAI_MODEL=tts-1  # or tts-1-hd (higher quality)
+```
+
 **STT Settings** (in `server.py`):
 ```python
 stt_client = FasterWhisperClient(
-    model_size="base",      # Fast and accurate
+    model_size="tiny",      # Fastest for Hackathon (~75MB)
     device="cpu",           # Use "cuda" for GPU
     compute_type="int8"     # Lower memory, faster
 )
+```
+
+**TTS Settings** (in `server.py`):
+```python
+# Automatically loaded from .env via Config()
+tts_client = get_tts_client()  # Returns ElevenLabs/OpenAI/Edge based on TTS_PROVIDER
+
+# ElevenLabs streaming parameters (in handle_text_input):
+async for audio_chunk in tts.synthesize_stream(
+    sentence, 
+    optimize_latency=3,      # 0-4: 3=max optimization
+    previous_text=previous   # Continuity between sentences
+)
+```
+
+**LLM Settings** (in `server.py`):
+```python
+# Automatically loaded from .env via Config()
+llm_client = get_or_create_session(session_id)  # Returns Gemini or OpenAI client
+
+# Both clients support streaming with same interface:
+for chunk in llm_client.chat_stream(message, history):
+    yield chunk
 ```
 
 **Audio Settings** (in `index.html`):
@@ -583,9 +711,9 @@ audio: {
 }
 ```
 
-**Available Models**:
-- `tiny` - Fastest, less accurate (~75MB)
-- `base` - Good balance (~150MB) **← Default**
+**Available STT Models**:
+- `tiny` - Fastest, less accurate (~75MB) **← Default for Hackathon**
+- `base` - Good balance (~150MB)
 - `small` - Better accuracy (~500MB)
 - `medium` - High accuracy (~1.5GB)
 - `large-v3` - Best accuracy (~3GB)
@@ -607,41 +735,62 @@ audio: {
 ### Voice Features
 
 **Input (STT)**:
-- Model: Faster-Whisper "base" (~150MB)
+- Model: Faster-Whisper "tiny" (~75MB, fastest for Hackathon)
 - Languages: Vietnamese, English (99 languages supported)
 - VAD: Voice Activity Detection enabled
-- Latency: ~2-4s for 10s audio on CPU
+- Latency: ~1-2s for 10s audio on CPU
 
-**Output (TTS)**:
-- Engine: Edge-TTS (Microsoft Edge, free)
-- Voice: vi-VN-HoaiMyNeural (Vietnamese female, warm tone)
-- Format: MP3 audio
-- Latency: ~1-2s for short responses
-- Auto-play: Immediate playback in browser
+**Output (TTS) - STREAMING MODE** ⚡:
+- **Primary Engine**: ElevenLabs (streaming API with continuity)
+  - Model: `eleven_multilingual_v2` (best quality)
+  - Voice: Configurable via `.env` (default: "rachel")
+  - Latency Optimization: Level 3 (max optimizations)
+  - **Streaming Strategy**:
+    - Text split by sentence boundaries (`.`, `!`, `?`, `\n`)
+    - Each sentence TTS'd in parallel
+    - Audio chunks stream to client immediately (8KB buffer)
+    - `previous_text` param maintains natural flow between sentences
+  - Format: MP3 (44.1kHz, 128kbps)
+  
+- **Fallback Engine**: Edge-TTS (if ElevenLabs fails)
+  - Voice: vi-VN-HoaiMyNeural (Vietnamese female)
+  - Rate: +20% (faster)
+  - Pitch: +25Hz (higher, more energetic)
+  - Format: MP3
+
+- **Auto-play**: Queued playback with 50ms gap between chunks
 
 ### Known Limitations
 
-- **First Run**: Model downloads automatically (~150MB for base model)
-- **STT Latency**: Base model ~2-4 seconds for 10s audio on CPU
-- **TTS Latency**: ~1-2 seconds for short responses
-- **Audio Format**: WebM input, MP3 output
-- **No Real-time VAD**: Recording must be stopped manually
+- **First Run**: Model downloads automatically (~75MB for tiny STT model)
+- **STT Latency**: Tiny model ~1-2 seconds for 10s audio on CPU
+- **TTS Streaming**: Requires ElevenLabs API (paid, but has free tier)
+- **Audio Format**: WebM input, MP3 output (streaming chunks)
+- **No Real-time VAD**: Recording must be stopped manually (browser limitation)
 - **Language**: Best for Vietnamese and English (model supports 99 languages)
-- **Voice Selection**: Fixed to vi-VN-HoaiMyNeural (configurable in code)
+- **Voice Selection**: Configurable via `.env` file
 - **No RVC**: Character voice conversion not yet integrated
+- **Sentence Splitting**: May occasionally split mid-sentence (punctuation-based)
 
 ### Performance Notes
 
-**STT Speed** (on M1 Mac with base model):
-- 5s audio: ~1.5-2s transcription
-- 10s audio: ~2-4s transcription  
-- 30s audio: ~5-8s transcription
+**STT Speed** (on M1 Mac with tiny model):
+- 5s audio: ~0.8-1.2s transcription
+- 10s audio: ~1-2s transcription  
+- 30s audio: ~3-5s transcription
+
+**TTS Streaming** (ElevenLabs with latency optimization 3):
+- First audio chunk: ~500-800ms after sentence completion
+- Subsequent chunks: ~100-200ms between chunks
+- Total pipeline latency: < 1.5s (STT + LLM + TTS streaming)
 
 **Optimization Tips**:
-1. Use `tiny` model for fastest speed (lower accuracy)
-2. Use GPU (`device="cuda"`) for 2-3x speedup
-3. Enable VAD filtering to skip silence
-4. Use `distil-large-v3` for best speed/accuracy balance
+1. Use ElevenLabs for streaming TTS (best latency)
+2. Set `optimize_latency=3` for max speed (slight quality trade-off)
+3. Use `tiny` STT model for fastest transcription
+4. Use GPU (`device="cuda"`) for 2-3x STT speedup
+5. Enable VAD filtering to skip silence in audio
+6. Use `eleven_turbo_v2` model for even faster TTS
 
 ### Testing
 
