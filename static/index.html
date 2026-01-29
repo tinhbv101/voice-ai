@@ -185,6 +185,7 @@
         let vadAudioChunks = [];
         let isSpeaking = false;
         let isAIResponding = false;
+        let currentAudio = null; // Track currently playing audio
 
         function connect() {
             // Auto-detect WebSocket URL based on current location
@@ -265,10 +266,21 @@
                 vad = await window.vad.MicVAD.new({
                     onSpeechStart: () => {
                         console.log('Speech started');
+
+                        // If AI is currently speaking, INTERRUPT it!
+                        if (isAIResponding || isPlaying) {
+                            console.log('🛑 User interrupted AI - stopping playback');
+                            interruptAI();
+                            addMessage('status', '🛑 Interrupted - listening to you...');
+                        }
+
                         isSpeaking = true;
                         vadAudioChunks = [];
                         updateVADStatus('🎤 Listening... (Speak now)', 'text-green-600');
-                        addMessage('status', '🎤 Listening...');
+
+                        if (!isAIResponding) {
+                            addMessage('status', '🎤 Listening...');
+                        }
                     },
                     onSpeechEnd: async (audio) => {
                         console.log('Speech ended, processing...');
@@ -288,11 +300,11 @@
                             updateVADStatus('👂 Waiting for speech...', 'text-gray-600');
                         }
                     },
-                    positiveSpeechThreshold: 0.8,
-                    negativeSpeechThreshold: 0.5,
-                    redemptionFrames: 8,
+                    positiveSpeechThreshold: 0.7,  // Lower = more sensitive (detect faster)
+                    negativeSpeechThreshold: 0.4,   // Lower = detect silence faster
+                    redemptionFrames: 5,            // Fewer frames = faster interrupt detection
                     preSpeechPadFrames: 1,
-                    minSpeechFrames: 4,
+                    minSpeechFrames: 3,             // Fewer frames = faster speech detection
                 });
 
                 await vad.start();
@@ -315,16 +327,37 @@
             }
         }
 
+        function interruptAI() {
+            console.log('Interrupting AI...');
+
+            // Stop current audio immediately
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio.currentTime = 0;
+                currentAudio = null;
+            }
+
+            // Clear all pending audio
+            audioQueue.forEach(url => URL.revokeObjectURL(url));
+            audioQueue = [];
+            isPlaying = false;
+            isAIResponding = false;
+
+            console.log('AI interrupted - ready for new input');
+        }
+
         async function stopVoiceChat() {
             if (vad) {
                 try {
-                    // Try to pause VAD (stop listening)
+                    // Pause first to stop listening immediately
                     if (typeof vad.pause === 'function') {
                         vad.pause();
+                        console.log('VAD paused');
                     }
-                    // Some versions use destroy instead
+                    // Then destroy if available
                     if (typeof vad.destroy === 'function') {
                         await vad.destroy();
+                        console.log('VAD destroyed');
                     }
                 } catch (error) {
                     console.error('Error stopping VAD:', error);
@@ -335,6 +368,9 @@
             isVoiceChatMode = false;
             isSpeaking = false;
             isAIResponding = false;
+
+            // Clear audio queue to prevent any remaining audio from playing
+            interruptAI();
 
             // Update UI
             document.getElementById('voice-chat-btn').textContent = '🚀 Start Voice Chat';
@@ -425,7 +461,8 @@
                         channelCount: 1,
                         sampleRate: 16000,
                         echoCancellation: true,
-                        noiseSuppression: true
+                        noiseSuppression: true,
+                        autoGainControl: true  // Better audio quality
                     }
                 });
 
@@ -626,6 +663,8 @@
                     if (isVoiceChatMode) {
                         updateVADStatus('💭 AI is thinking...', 'text-blue-600');
                         isAIResponding = true;
+                        // Keep VAD running to detect interrupts!
+                        console.log('AI is responding - VAD still listening for interrupts');
                     }
                     break;
 
@@ -683,11 +722,13 @@
             isPlaying = true;
             const audioUrl = audioQueue.shift();
             const audio = new Audio(audioUrl);
+            currentAudio = audio; // Track current audio for interrupt
 
             console.log(`Playing audio (${audioQueue.length} remaining in queue)`);
 
             audio.onended = () => {
                 URL.revokeObjectURL(audioUrl);
+                currentAudio = null;
                 isPlaying = false;
                 console.log('Audio finished');
 
@@ -705,6 +746,7 @@
             audio.onerror = (e) => {
                 console.error('Audio playback error:', e);
                 URL.revokeObjectURL(audioUrl);
+                currentAudio = null;
                 isPlaying = false;
                 processAudioQueue();
             };
@@ -712,6 +754,7 @@
             audio.play().catch(error => {
                 console.error('Error playing audio:', error);
                 URL.revokeObjectURL(audioUrl);
+                currentAudio = null;
                 isPlaying = false;
                 processAudioQueue();
             });
