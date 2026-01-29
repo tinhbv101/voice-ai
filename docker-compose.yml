@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  voiceai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voiceai-app
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source code (for development hot reload)
+      - ./src:/app/src
+      - ./static:/app/static
+      # Mount output directory
+      - ./audio_output:/app/audio_output
+      # Mount models directory (cache STT models)
+      - ./models:/app/models
+    environment:
+      # LLM Configuration
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-1.5-flash}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_LLM_MODEL=${OPENAI_LLM_MODEL:-gpt-4o-mini}
+
+      # TTS Configuration
+      - TTS_PROVIDER=${TTS_PROVIDER:-edge}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE=${ELEVENLABS_VOICE:-rachel}
+      - ELEVENLABS_MODEL=${ELEVENLABS_MODEL:-eleven_multilingual_v2}
+      - OPENAI_VOICE=${OPENAI_VOICE:-nova}
+      - OPENAI_MODEL=${OPENAI_MODEL:-tts-1}
+
+      # General settings
+      - TEMPERATURE=${TEMPERATURE:-0.7}
+      - MAX_MEMORY_MESSAGES=${MAX_MEMORY_MESSAGES:-10}
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - voiceai-network
+
+networks:
+  voiceai-network:
+    driver: bridge

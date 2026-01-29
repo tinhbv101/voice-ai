@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  voiceai:
+    # Don't mount source code in production
+    volumes:
+      - ./audio_output:/app/audio_output
+      - ./models:/app/models
+
+    # Production command (no reload)
+    command: uvicorn src.server:app --host 0.0.0.0 --port 8000 --workers 2
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
